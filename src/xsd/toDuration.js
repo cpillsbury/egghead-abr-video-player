@@ -27,4 +27,5 @@ const toDuration = (str) => {
         .reduce((acc, val, i) => acc + (val * toSecondsMap[i]), 0);
 };
 
-export default { toDuration };
+export { toDuration };
+export default toDuration;

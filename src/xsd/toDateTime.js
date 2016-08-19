@@ -26,4 +26,5 @@ const toDateTime = (str) => {
     return new Date(utc+offset);
 };
 
-export default { toDateTime };
+export { toDateTime };
+export default toDateTime;
