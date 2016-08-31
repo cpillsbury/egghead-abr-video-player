@@ -1,9 +1,15 @@
 'use strict';
+export * from './asArray';
 export * from './assign';
+export * from './chain';
+export * from './distinct';
 export * from './existy';
+export * from './filter';
+export * from './find';
 export * from './identity';
 export * from './isString';
 export * from './noop';
 export * from './not';
 export * from './partial';
+export * from './pluck';
 export * from './toUint';

@@ -10,7 +10,7 @@ const toArray = timeRanges => {
     );
 };
 
-// TODO: Move me! (not specific to timeRange) (CJP)
+// TODO: Move me? (not specific to timeRange) (CJP)
 // TODO: Refactor to higher order for pt or impl simple partial? (CJP)
 const containsPoint = (pt, start, end, tol = 0) => {
     return gte(pt, start, tol) && lte(pt, end, tol);
@@ -36,4 +36,6 @@ const mergedRangesReducer = (ranges, range) => {
     ];
 };
 
-export { containsPoint, mergedRangesReducer, rangeAlignedTo, toArray, toUnitPrecision };
+const toCurrentRange = t => rs => rs.find(r => containsPoint(t, ...r));
+
+export { containsPoint, mergedRangesReducer, rangeAlignedTo, toArray, toUnitPrecision, toCurrentRange };

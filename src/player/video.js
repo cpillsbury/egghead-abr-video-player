@@ -6,13 +6,11 @@ import { fromUrl } from './manifest';
 import { mergedRangesReducer, rangeAlignedTo, toArray, containsPoint } from '../mse/timeRange';
 import { toMpd } from '../mpd/mpd';
 
-const toMimeCodec = ({ mimeType, codecs }) => (mimeType + ';codecs="' + codecs + '"');
 
 const mediaSetLoader = mediaSource => mediaSet => {
     // TODO: Cleanup (CJP)
     const playheadTime$ = Observable.fromEvent(theVideo(), 'timeupdate')
         .merge(Observable.fromEvent(theVideo(), 'seeking'))
-        .do(e => console.log(e))
         .map(() => theVideo().currentTime)
         .startWith(0);
     const mimeType = mediaSet.mimeType;
@@ -31,11 +29,8 @@ const mediaSetLoader = mediaSource => mediaSet => {
             .map(toNormalizedBuffer);
     };
     const loadSegment = ({ url }) => {
-        console.log('starting load segment @ ' + url);
         return Observable.ajax({ url, responseType: 'arraybuffer', crossDomain: true })
-            .do(() => console.log('LOADED SEGMENT'))
             .map(({ response }) => response)
-            .do(() => console.log('MAPPED TO SEGMENT DATA'))
             .do(response => sourceBuffer.appendBuffer(response));
     };
     return loadSegment(segmentList.initSegment)
@@ -50,17 +45,12 @@ const mediaSetLoader = mediaSource => mediaSet => {
                 const nextSegment = currentRange ?
                     segmentList.getByTime(currentRange[1] + segmentList.segmentDuration / 2) :
                     segmentList.getByTime(t);
-                console.log('NEXT SEGMENT:');
-                console.log(nextSegment);
                 return nextSegment;
             };
             return playheadTime$
                 .map(toNextSegment)
-                .do(() => console.log('MAPPED TO SEGMENT'))
                 .filter(identity)
-                .do(() => console.log('UNFILTERED SEGMENT'))
                 .distinctUntilChanged()
-                .do(() => console.log('WAS DISTINCT SEGMENT'))
                 .switchMap(loadSegment);
         });
 };
