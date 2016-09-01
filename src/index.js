@@ -6,7 +6,6 @@ import { mergedRangesReducer, rangeAlignedTo, toArray, toCurrentRange, toMimeCod
 import { existy, not, identity, pluck, chain } from './fp/fp';
 import timeToNextSegment from './buffer/timeToNextSegment';
 
-const withSwitchMap = c$ => to$ => (...args) => c$.switchMapTo(to$(...args));
 const supportedMimeTypes = ['video/mp4', 'audio/mp4'];
 const isSupportedMimeType = (...types) => ({ mimeType }) => types.find(type => mimeType && mimeType.indexOf(type) >= 0);
 const toSupportedMediaSets = mediaPresentation => {
@@ -151,39 +150,32 @@ const ehv = (selector) => {
     containerEl.innerHTML = '';
     containerEl.appendChild(videoEl);
 
-    const videoEl$ = Observable.of(videoEl);
-
     const playbackRate$ = fromProperty(videoEl, 'playbackRate', 'ratechange');
     const playheadTime$ = fromProperty(videoEl, 'currentTime', ['timeupdate', 'seeking']);
 
     const setup = ({ dash } = {}) => {
 
-        const toMediaSource$ = videoEl$ => {
-            return videoEl$.switchMap(videoEl => {
-                const mediaSource = new MediaSource();
-                videoEl.src = URL.createObjectURL(mediaSource);
+        const mediaSource = new MediaSource();
+        videoEl.src = URL.createObjectURL(mediaSource);
 
-                const mediaSourceReadyState$ = fromProperty(
-                    mediaSource,
-                    'readyState',
-                    ['sourceopen', 'sourceclose', 'sourceended']
-                );
+        const mediaSourceReadyState$ = fromProperty(
+            mediaSource,
+            'readyState',
+            ['sourceopen', 'sourceclose', 'sourceended']
+        );
 
-                return mediaSourceReadyState$
-                    .filter(rs => rs === 'open')
-                    .mapTo(mediaSource);
-            });
-        };
+        const mediaSource$ = mediaSourceReadyState$
+            .filter(rs => rs === 'open')
+            .mapTo(mediaSource);
 
         const withMediaSourceUpdate = mediaSource$ => mediaPresentation$ => {
-            return mediaPresentation$.do(console.log.bind(console)).switchMap(mediaPresentation => {
-                return mediaSource$.do(console.log.bind(console))
-                    .do(mediaSource => { mediaSource.duration = mediaPresentation.duration; }).do(console.log.bind(console))
+            return mediaPresentation$.switchMap(mediaPresentation => {
+                return mediaSource$
+                    .do(mediaSource => { mediaSource.duration = mediaPresentation.duration; })
                     .mapTo(mediaPresentation);
             });
         };
 
-        const mediaSource$ = toMediaSource$(videoEl$);
         const toMediaPresentation$ = withMediaSourceUpdate(mediaSource$);
 
         const projection = toMediaPresentation({ baseUrls: [dash.slice(0, dash.lastIndexOf('/') + 1)] });
@@ -196,6 +188,7 @@ const ehv = (selector) => {
         return mediaPresentation$
             .switchMap(mediaPresentation => {
                 return mediaSource$
+                    .do(mediaSource => { mediaSource.duration = mediaPresentation.duration; })
                     .switchMap(mediaSource => {
                         const mediaBuffers = toSupportedMediaSets(mediaPresentation)
                             .map(mediaSet => {
@@ -212,6 +205,7 @@ const ehv = (selector) => {
                                     .mapTo(true);
 
                                 const lastRTT$ = new ReplaySubject(1);
+                                const withSwitchMap = c$ => to$ => (...args) => c$.switchMapTo(to$(...args));
 
                                 const toSegment$ = chain(
                                     provideDuration(lastRTT$),
