@@ -1,11 +1,12 @@
 'use strict';
-import { Observable, fromProperty, withDuration, withSideEffect, withConcat, withConcatTo } from './frp/frp';
+import { Observable, ReplaySubject, fromProperty, withSideEffect } from './frp/frp';
 import toMediaPresentation from './mpd/toMediaPresentation';
 import fromUrl from './player/manifest';
 import { mergedRangesReducer, rangeAlignedTo, toArray, toCurrentRange, toMimeCodec } from './mse/mse';
-import { existy, not, identity, distinct, pluck } from './fp/fp';
+import { existy, not, identity, pluck, chain } from './fp/fp';
 import timeToNextSegment from './buffer/timeToNextSegment';
 
+const withSwitchMap = c$ => to$ => (...args) => c$.switchMapTo(to$(...args));
 const supportedMimeTypes = ['video/mp4', 'audio/mp4'];
 const isSupportedMimeType = (...types) => ({ mimeType }) => types.find(type => mimeType && mimeType.indexOf(type) >= 0);
 const toSupportedMediaSets = mediaPresentation => {
@@ -44,17 +45,6 @@ const toO = (...ks) => (...vs) => {
 
 const toMerged = (...os) => Object.assign({}, ...os);
 
-const mediaBufferModelProps = [
-    'buffered',
-    'playheadTime',
-    'playbackRate',
-    'lastRTT',
-    'segmentDuration',
-    'segments',
-    'minDesiredBufferSize',
-    'maxDesiredBufferSize'
-];
-
 const toMediaBufferResult = ({
     buffered,
     playheadTime,
@@ -62,8 +52,8 @@ const toMediaBufferResult = ({
     lastRTT,
     segmentDuration,
     segments,
-    minDesiredBufferSize = 120,
-    maxDesiredBufferSize = 240
+    minDesiredBufferSize,
+    maxDesiredBufferSize
 }) => {
     const currentRange = toCurrentRange(playheadTime)(buffered);
     const bufferSize = currentRange ? currentRange[1] - playheadTime : 0;
@@ -86,6 +76,73 @@ const toMediaBufferResult = ({
     return { waitTime, segment };
 };
 
+const toMediaBufferEngine$Def = ({ buffered$, playheadTime$, playbackRate$, lastRTT$, toSegment$ }) => {
+    const mediaBufferModelProps = [
+        'buffered',
+        'playheadTime',
+        'playbackRate',
+        'lastRTT',
+        'segmentDuration',
+        'segments',
+        'minDesiredBufferSize',
+        'maxDesiredBufferSize'
+    ];
+
+    const toMediaBufferModel$ = segmentInfo => {
+        return Observable.combineLatest(
+            buffered$.map(toNormalizedBuffer(pluck(segmentInfo, 'segments', 0, 'duration'))),
+            playheadTime$,
+            playbackRate$,
+            lastRTT$,
+            Observable.of(pluck(segmentInfo, 'segments', 0, 'duration')),
+            Observable.of(segmentInfo.segments),
+            toO(...mediaBufferModelProps));
+    };
+
+    const toMediaBuffer$ = mediaBufferModel$ => {
+        return mediaBufferModel$
+            .map(toMediaBufferResult)
+            .filter(existy)
+            .distinctUntilChanged((a, b) => a.segment.url === b.segment.url)
+            .switchMap(({ segment, waitTime }) => {
+                return Observable.of(segment)
+                    .delay(waitTime)
+                    .switchMap(toSegment$);
+            });
+    };
+
+    return segmentInfo => {
+        return toSegment$(segmentInfo.initSegment)
+            .switchMapTo(toMediaBuffer$(toMediaBufferModel$(segmentInfo)));
+    };
+};
+
+// TODO: Implement me (CJP)
+const toSwitchingEngine$Def = () => {
+    return (mediaSet) => {
+        return Observable.of(pluck(mediaSet, 'children', 0));
+    };
+};
+
+const toABREngine$Def = ({ toMediaBufferEngine$, toSwitchingEngine$ }) => {
+    return (mediaSet) => {
+        return toSwitchingEngine$(mediaSet)
+            .switchMap(toMediaBufferEngine$);
+    };
+};
+
+const provideDuration = s$ => to$ => {
+    return (...args) => {
+        return Observable.create(sub => {
+            const start = Date.now();
+            to$(...args).subscribe(x => {
+                s$.next(Date.now() - start);
+                sub.next(x);
+            });
+        });
+    };
+};
+
 const ehv = (selector) => {
 
     const videoEl = document.createElement('video');
@@ -94,37 +151,56 @@ const ehv = (selector) => {
     containerEl.innerHTML = '';
     containerEl.appendChild(videoEl);
 
+    const videoEl$ = Observable.of(videoEl);
+
     const playbackRate$ = fromProperty(videoEl, 'playbackRate', 'ratechange');
     const playheadTime$ = fromProperty(videoEl, 'currentTime', ['timeupdate', 'seeking']);
 
     const setup = ({ dash } = {}) => {
 
-        const mediaSource = new MediaSource();
-        videoEl.src = URL.createObjectURL(mediaSource);
+        const toMediaSource$ = videoEl$ => {
+            return videoEl$.switchMap(videoEl => {
+                const mediaSource = new MediaSource();
+                videoEl.src = URL.createObjectURL(mediaSource);
 
-        const mediaSourceReadyState$ = fromProperty(
-            mediaSource,
-            'readyState',
-            ['sourceopen', 'sourceclose', 'sourceended']
-        );
+                const mediaSourceReadyState$ = fromProperty(
+                    mediaSource,
+                    'readyState',
+                    ['sourceopen', 'sourceclose', 'sourceended']
+                );
 
-        const mediaSource$ = mediaSourceReadyState$
-            .filter(rs => rs === 'open')
-            .mapTo(mediaSource);
+                return mediaSourceReadyState$
+                    .filter(rs => rs === 'open')
+                    .mapTo(mediaSource);
+            });
+        };
+
+        const withMediaSourceUpdate = mediaSource$ => mediaPresentation$ => {
+            return mediaPresentation$.do(console.log.bind(console)).switchMap(mediaPresentation => {
+                return mediaSource$.do(console.log.bind(console))
+                    .do(mediaSource => { mediaSource.duration = mediaPresentation.duration; }).do(console.log.bind(console))
+                    .mapTo(mediaPresentation);
+            });
+        };
+
+        const mediaSource$ = toMediaSource$(videoEl$);
+        const toMediaPresentation$ = withMediaSourceUpdate(mediaSource$);
 
         const projection = toMediaPresentation({ baseUrls: [dash.slice(0, dash.lastIndexOf('/') + 1)] });
-        const mediaPresentation$ = fromUrl(dash)
+        const mediaPresentation$ = toMediaPresentation$(
+            fromUrl(dash)
             .map(xmlDoc => xmlDoc.querySelector('MPD'))
-            .map(projection);
+            .map(projection)
+        );
 
         return mediaPresentation$
             .switchMap(mediaPresentation => {
                 return mediaSource$
-                    .do(mediaSource => { mediaSource.duration = mediaPresentation.duration; })
                     .switchMap(mediaSource => {
                         const mediaBuffers = toSupportedMediaSets(mediaPresentation)
                             .map(mediaSet => {
                                 const sb = mediaSource.addSourceBuffer(mediaSetToMimeCodec(mediaSet));
+                                const buffered$ = fromProperty(sb, 'buffered', 'updateend');
                                 const sbIsUpdating$ = fromProperty(
                                     sb,
                                     'updating',
@@ -135,45 +211,27 @@ const ehv = (selector) => {
                                     .filter(not(identity))
                                     .mapTo(true);
 
-                                const toSegmentBase$ = ({ url }) => Observable.ajax({url, responseType: 'arraybuffer', crossDomain: true}).map(({ response}) => response)
-                                const toSegmentSE$ = withSideEffect(bytes => sb.appendBuffer(bytes))(toSegmentBase$);
-                                const toSegmentWithConcat$ = withConcat(nextSegment$.take(1))(toSegmentSE$);
+                                const lastRTT$ = new ReplaySubject(1);
 
-                                const toSegment$ = withDuration(toSegmentWithConcat$);
-                                const lastRTT$ = toSegment$.toDuration$();
+                                const toSegment$ = chain(
+                                    provideDuration(lastRTT$),
+                                    withSideEffect(bytes => sb.appendBuffer(bytes)),
+                                    withSwitchMap(nextSegment$.take(1))
+                                )(({ url }) => Observable.ajax({url, responseType: 'arraybuffer', crossDomain: true}).map(({ response}) => response));
 
-                                const segmentInfo = pluck(mediaSet, 'children', 0);
-
-                                const buffered$ = fromProperty(sb, 'buffered', 'updateend')
-                                    .map(toNormalizedBuffer(pluck(segmentInfo, 'segments', 0, 'duration')));
-
-                                const toMediaBufferModel$ = segmentInfo => {
-                                    const mediaBufferModel$ = Observable.combineLatest(
-                                        buffered$,
-                                        playheadTime$,
-                                        playbackRate$,
-                                        lastRTT$,
-                                        Observable.of(pluck(segmentInfo, 'segments', 0, 'duration')),
-                                        Observable.of(segmentInfo.segments),
-                                        toO(...mediaBufferModelProps));
-                                    return mediaBufferModel$;
+                                const deps = {
+                                    buffered$,
+                                    playheadTime$,
+                                    playbackRate$,
+                                    lastRTT$,
+                                    toSegment$
                                 };
 
-                                const toMediaBuffer$ = mediaBufferModel$ => segmentInfo => {
-                                    const mediaBuffer$ = mediaBufferModel$
-                                        .map(toMediaBufferResult)
-                                        .filter(existy)
-                                        .distinctUntilChanged((a, b) => a.segment.url === b.segment.url)
-                                        .switchMap(({ segment, waitTime }) => {
-                                            return Observable.of(segment)
-                                                .delay(waitTime)
-                                                .switchMap(toSegment$);
-                                        });
+                                const toMediaBufferEngine$ = toMediaBufferEngine$Def(deps);
+                                const toSwitchingEngine$ = toSwitchingEngine$Def();
+                                const toABREngine$ = toABREngine$Def({ toMediaBufferEngine$, toSwitchingEngine$ });
 
-                                    return withConcatTo(toSegment$(segmentInfo.initSegment))(mediaBuffer$);
-                                };
-
-                                return toMediaBuffer$(toMediaBufferModel$(segmentInfo))(segmentInfo);
+                                return toABREngine$(mediaSet);
                             });
                         return Observable.merge(...mediaBuffers);
                     });

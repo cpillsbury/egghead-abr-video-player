@@ -1,6 +1,6 @@
 'use strict';
-const MIN_DESIRED_BUFFER_SIZE = 20;
-const MAX_DESIRED_BUFFER_SIZE = 40;
+const MIN_DESIRED_BUFFER_SIZE = 40;
+const MAX_DESIRED_BUFFER_SIZE = 80;
 
 const timeToNextSegment = ({
     lastRTT = 0,
