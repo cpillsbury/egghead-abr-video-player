@@ -6,6 +6,86 @@ import { mergedRangesReducer, rangeAlignedTo, toArray, toCurrentRange, toMimeCod
 import { existy, not, identity, distinct, pluck } from './fp/fp';
 import timeToNextSegment from './buffer/timeToNextSegment';
 
+const supportedMimeTypes = ['video/mp4', 'audio/mp4'];
+const isSupportedMimeType = (...types) => ({ mimeType }) => types.find(type => mimeType && mimeType.indexOf(type) >= 0);
+const toSupportedMediaSets = mediaPresentation => {
+    return pluck(mediaPresentation, 'children', 0, 'children')
+        .filter(isSupportedMimeType(...supportedMimeTypes));
+};
+
+const mediaSetToMimeCodec = ({ mimeType, children }) => {
+    return toMimeCodec({ mimeType, codecs: children.map(({ codecs }) => codecs) });
+};
+
+const toNormalizedBuffer = duration => {
+    const toAligned = rangeAlignedTo(duration);
+    return buffered => {
+        return toArray(buffered)
+            .map(toAligned)
+            .reduce(mergedRangesReducer, []);
+    };
+};
+
+const toUnitPrecisionFloor = unit => x => Math.floor(x/unit) * unit;
+const toSegmentTime = ({ currentRange, segmentDuration, playheadTime }) => {
+    const baseTime = currentRange ?
+        currentRange[1] :
+        toUnitPrecisionFloor(segmentDuration)(playheadTime);
+    return baseTime + (segmentDuration / 2);
+};
+
+const toO = (...ks) => (...vs) => {
+    return vs.slice(0, ks.length + 1)
+        .reduce((o, v, i) => {
+            o[ks[i]] = v;
+            return o;
+        }, {});
+};
+
+const toMerged = (...os) => Object.assign({}, ...os);
+
+const mediaBufferModelProps = [
+    'buffered',
+    'playheadTime',
+    'playbackRate',
+    'lastRTT',
+    'segmentDuration',
+    'segments',
+    'minDesiredBufferSize',
+    'maxDesiredBufferSize'
+];
+
+const toMediaBufferResult = ({
+    buffered,
+    playheadTime,
+    playbackRate,
+    lastRTT,
+    segmentDuration,
+    segments,
+    minDesiredBufferSize = 120,
+    maxDesiredBufferSize = 240
+}) => {
+    const currentRange = toCurrentRange(playheadTime)(buffered);
+    const bufferSize = currentRange ? currentRange[1] - playheadTime : 0;
+    const waitTime = timeToNextSegment({
+        lastRTT,
+        bufferSize,
+        segmentDuration,
+        playbackRate,
+        minDesiredBufferSize,
+        maxDesiredBufferSize
+    });
+
+    if (!existy(waitTime)) { return undefined; }
+
+    const t = toSegmentTime({ currentRange, segmentDuration, playheadTime });
+    const segment = segments[Math.floor(t/segmentDuration)];
+
+    if (!segment) { return undefined; }
+
+    return { waitTime, segment };
+};
+
 const ehv = (selector) => {
 
     const videoEl = document.createElement('video');
@@ -33,27 +113,23 @@ const ehv = (selector) => {
             .mapTo(mediaSource);
 
         const projection = toMediaPresentation({ baseUrls: [dash.slice(0, dash.lastIndexOf('/') + 1)] });
-        return fromUrl(dash)
+        const mediaPresentation$ = fromUrl(dash)
             .map(xmlDoc => xmlDoc.querySelector('MPD'))
-            .map(projection)
+            .map(projection);
+
+        return mediaPresentation$
             .switchMap(mediaPresentation => {
                 return mediaSource$
                     .do(mediaSource => { mediaSource.duration = mediaPresentation.duration; })
                     .switchMap(mediaSource => {
-                        const isSupportedMimeType = (...types) => ({ mimeType }) => types.find(type => mimeType && mimeType.indexOf(type) >= 0);
-                        const supportedMimeTypes = ['video', 'audio'];
-                        const sourceBuffers = pluck(mediaPresentation, 'children', 0, 'children')
-                            .filter(isSupportedMimeType(...supportedMimeTypes))
+                        const mediaBuffers = toSupportedMediaSets(mediaPresentation)
                             .map(mediaSet => {
-                                const { mimeType } = mediaSet;
-                                const codecs = distinct(pluck(mediaSet, 'children').map(({ codecs }) => codecs));
-
-                                const sb = mediaSource.addSourceBuffer(toMimeCodec({ mimeType, codecs }));
+                                const sb = mediaSource.addSourceBuffer(mediaSetToMimeCodec(mediaSet));
                                 const sbIsUpdating$ = fromProperty(
                                     sb,
                                     'updating',
                                     ['abort', 'error', 'update', 'updateend', 'updatestart']
-                                ).distinctUntilChanged();
+                                );
 
                                 const nextSegment$ = sbIsUpdating$
                                     .filter(not(identity))
@@ -62,81 +138,30 @@ const ehv = (selector) => {
                                 const toSegmentBase$ = ({ url }) => Observable.ajax({url, responseType: 'arraybuffer', crossDomain: true}).map(({ response}) => response)
                                 const toSegmentSE$ = withSideEffect(bytes => sb.appendBuffer(bytes))(toSegmentBase$);
                                 const toSegmentWithConcat$ = withConcat(nextSegment$.take(1))(toSegmentSE$);
+
                                 const toSegment$ = withDuration(toSegmentWithConcat$);
                                 const lastRTT$ = toSegment$.toDuration$();
-
-                                const toNormalizedBuffer = duration => {
-                                    const toAligned = rangeAlignedTo(duration);
-                                    return buffered => {
-                                        return toArray(buffered)
-                                            .map(toAligned)
-                                            .reduce(mergedRangesReducer, []);
-                                    };
-                                };
 
                                 const segmentInfo = pluck(mediaSet, 'children', 0);
 
                                 const buffered$ = fromProperty(sb, 'buffered', 'updateend')
                                     .map(toNormalizedBuffer(pluck(segmentInfo, 'segments', 0, 'duration')));
 
-                                const toMediaBuffer$ = segmentInfo => {
-                                    const { segments, initSegment } = segmentInfo;
-                                    const segmentDuration = pluck(segments, 0, 'duration');
-                                    const segmentDuration$ = Observable.of(segmentDuration);
-
-                                    const toSegmentByTime = time => segments[Math.floor(time/segmentDuration)];
+                                const toMediaBufferModel$ = segmentInfo => {
                                     const mediaBufferModel$ = Observable.combineLatest(
                                         buffered$,
                                         playheadTime$,
                                         playbackRate$,
                                         lastRTT$,
-                                        segmentDuration$,
-                                        (buffered, playheadTime, playbackRate, lastRTT, segmentDuration) => {
-                                            return {
-                                                buffered,
-                                                playheadTime,
-                                                playbackRate,
-                                                lastRTT,
-                                                segmentDuration
-                                            };
-                                        });
+                                        Observable.of(pluck(segmentInfo, 'segments', 0, 'duration')),
+                                        Observable.of(segmentInfo.segments),
+                                        toO(...mediaBufferModelProps));
+                                    return mediaBufferModel$;
+                                };
 
-                                    const mediaBufferResult$ = mediaBufferModel$
-                                        .map(({
-                                            buffered,
-                                            playheadTime,
-                                            playbackRate,
-                                            lastRTT,
-                                            segmentDuration
-                                        }) => {
-                                            const currentRange = toCurrentRange(playheadTime)(buffered);
-                                            const bufferSize = currentRange ? currentRange[1] - playheadTime : 0;
-                                            const waitTime = timeToNextSegment({
-                                                lastRTT,
-                                                bufferSize,
-                                                segmentDuration,
-                                                playbackRate
-                                            });
-
-                                            if (!existy(waitTime)) { return undefined; }
-
-                                            const toUnitPrecisionFloor = unit => x => Math.floor(x/unit) * unit;
-                                            const toSegmentTime = ({ currentRange, segmentDuration, playheadTime }) => {
-                                                const baseTime = currentRange ?
-                                                    currentRange[1] :
-                                                    toUnitPrecisionFloor(segmentDuration)(playheadTime);
-                                                return baseTime + (segmentDuration / 2);
-                                            };
-
-                                            const t = toSegmentTime({ currentRange, segmentDuration, playheadTime });
-                                            const segment = toSegmentByTime(t);
-
-                                            if (!segment) { return undefined; }
-
-                                            return { waitTime, segment };
-                                    });
-
-                                    const mediaBuffer$ = mediaBufferResult$
+                                const toMediaBuffer$ = mediaBufferModel$ => segmentInfo => {
+                                    const mediaBuffer$ = mediaBufferModel$
+                                        .map(toMediaBufferResult)
                                         .filter(existy)
                                         .distinctUntilChanged((a, b) => a.segment.url === b.segment.url)
                                         .switchMap(({ segment, waitTime }) => {
@@ -145,13 +170,13 @@ const ehv = (selector) => {
                                                 .switchMap(toSegment$);
                                         });
 
-                                    return withConcatTo(toSegment$(initSegment))(mediaBuffer$);
+                                    return withConcatTo(toSegment$(segmentInfo.initSegment))(mediaBuffer$);
                                 };
-                                return toMediaBuffer$(segmentInfo);
+
+                                return toMediaBuffer$(toMediaBufferModel$(segmentInfo))(segmentInfo);
                             });
-                        return Observable.merge(...sourceBuffers);
-                    })
-                    .mapTo(mediaPresentation);
+                        return Observable.merge(...mediaBuffers);
+                    });
             });
     };
     return { setup };
