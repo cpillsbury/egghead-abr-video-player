@@ -38,4 +38,13 @@ const mergedRangesReducer = (ranges, range) => {
 
 const toCurrentRange = t => rs => rs.find(r => containsPoint(t, ...r));
 
-export { containsPoint, mergedRangesReducer, rangeAlignedTo, toArray, toUnitPrecision, toCurrentRange };
+const toNormalizedRanges = duration => {
+    const toAligned = rangeAlignedTo(duration);
+    return ranges => {
+        return toArray(ranges)
+            .map(toAligned)
+            .reduce(mergedRangesReducer, []);
+    };
+};
+
+export { containsPoint, mergedRangesReducer, rangeAlignedTo, toArray, toUnitPrecision, toCurrentRange, toNormalizedRanges };

@@ -13,3 +13,4 @@ export * from './withConcatTo';
 export * from './withDuration'; // TODO: Revisit impl (CJP)
 export * from './withSideEffect';
 export * from './withSideEffectTo';
+export * from './withSwitchMap';
