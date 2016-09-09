@@ -1,146 +1,22 @@
 'use strict';
-import { Observable, ReplaySubject, fromProperty, withSideEffect } from './frp/frp';
+import {
+    Observable,
+    ReplaySubject,
+    fromProperty,
+    withSideEffect,
+    withSideEffectTo,
+    withSwitchMap,
+    provideDuration
+} from './frp/frp';
+
 import toMediaPresentation from './mpd/toMediaPresentation';
+import mediaSetToMimeCodec from './mpd/mediaSetToMimeCodec';
+import toSupportedMediaSets from './mpd/toSupportedMediaSets';
 import fromUrl from './player/manifest';
-import { mergedRangesReducer, rangeAlignedTo, toArray, toCurrentRange, toMimeCodec } from './mse/mse';
-import { existy, not, identity, pluck, chain } from './fp/fp';
-import timeToNextSegment from './buffer/timeToNextSegment';
-
-const supportedMimeTypes = ['video/mp4', 'audio/mp4'];
-const isSupportedMimeType = (...types) => ({ mimeType }) => types.find(type => mimeType && mimeType.indexOf(type) >= 0);
-const toSupportedMediaSets = mediaPresentation => {
-    return pluck(mediaPresentation, 'children', 0, 'children')
-        .filter(isSupportedMimeType(...supportedMimeTypes));
-};
-
-const mediaSetToMimeCodec = ({ mimeType, children }) => {
-    return toMimeCodec({ mimeType, codecs: children.map(({ codecs }) => codecs) });
-};
-
-const toNormalizedBuffer = duration => {
-    const toAligned = rangeAlignedTo(duration);
-    return buffered => {
-        return toArray(buffered)
-            .map(toAligned)
-            .reduce(mergedRangesReducer, []);
-    };
-};
-
-const toUnitPrecisionFloor = unit => x => Math.floor(x/unit) * unit;
-const toSegmentTime = ({ currentRange, segmentDuration, playheadTime }) => {
-    const baseTime = currentRange ?
-        currentRange[1] :
-        toUnitPrecisionFloor(segmentDuration)(playheadTime);
-    return baseTime + (segmentDuration / 2);
-};
-
-const toO = (...ks) => (...vs) => {
-    return vs.slice(0, ks.length + 1)
-        .reduce((o, v, i) => {
-            o[ks[i]] = v;
-            return o;
-        }, {});
-};
-
-const toMerged = (...os) => Object.assign({}, ...os);
-
-const toMediaBufferResult = ({
-    buffered,
-    playheadTime,
-    playbackRate,
-    lastRTT,
-    segmentDuration,
-    segments,
-    minDesiredBufferSize,
-    maxDesiredBufferSize
-}) => {
-    const currentRange = toCurrentRange(playheadTime)(buffered);
-    const bufferSize = currentRange ? currentRange[1] - playheadTime : 0;
-    const waitTime = timeToNextSegment({
-        lastRTT,
-        bufferSize,
-        segmentDuration,
-        playbackRate,
-        minDesiredBufferSize,
-        maxDesiredBufferSize
-    });
-
-    if (!existy(waitTime)) { return undefined; }
-
-    const t = toSegmentTime({ currentRange, segmentDuration, playheadTime });
-    const segment = segments[Math.floor(t/segmentDuration)];
-
-    if (!segment) { return undefined; }
-
-    return { waitTime, segment };
-};
-
-const toMediaBufferEngine$Def = ({ buffered$, playheadTime$, playbackRate$, lastRTT$, toSegment$ }) => {
-    const mediaBufferModelProps = [
-        'buffered',
-        'playheadTime',
-        'playbackRate',
-        'lastRTT',
-        'segmentDuration',
-        'segments',
-        'minDesiredBufferSize',
-        'maxDesiredBufferSize'
-    ];
-
-    const toMediaBufferModel$ = segmentInfo => {
-        return Observable.combineLatest(
-            buffered$.map(toNormalizedBuffer(pluck(segmentInfo, 'segments', 0, 'duration'))),
-            playheadTime$,
-            playbackRate$,
-            lastRTT$,
-            Observable.of(pluck(segmentInfo, 'segments', 0, 'duration')),
-            Observable.of(segmentInfo.segments),
-            toO(...mediaBufferModelProps));
-    };
-
-    const toMediaBuffer$ = mediaBufferModel$ => {
-        return mediaBufferModel$
-            .map(toMediaBufferResult)
-            .filter(existy)
-            .distinctUntilChanged((a, b) => a.segment.url === b.segment.url)
-            .switchMap(({ segment, waitTime }) => {
-                return Observable.of(segment)
-                    .delay(waitTime)
-                    .switchMap(toSegment$);
-            });
-    };
-
-    return segmentInfo => {
-        return toSegment$(segmentInfo.initSegment)
-            .switchMapTo(toMediaBuffer$(toMediaBufferModel$(segmentInfo)));
-    };
-};
-
-// TODO: Implement me (CJP)
-const toSwitchingEngine$Def = () => {
-    return (mediaSet) => {
-        return Observable.of(pluck(mediaSet, 'children', 0));
-    };
-};
-
-const toABREngine$Def = ({ toMediaBufferEngine$, toSwitchingEngine$ }) => {
-    return (mediaSet) => {
-        return toSwitchingEngine$(mediaSet)
-            .switchMap(toMediaBufferEngine$);
-    };
-};
-
-const provideDuration = s$ => to$ => {
-    return (...args) => {
-        return Observable.create(sub => {
-            const start = Date.now();
-            to$(...args).subscribe(x => {
-                s$.next(Date.now() - start);
-                sub.next(x);
-            });
-        });
-    };
-};
+import toMediaBufferEngine$Def from './player/toMediaBufferEngine$Def';
+import toSwitchingEngine$Def from './player/toSwitchingEngine$Def';
+import toABREngine$Def from './player/toABREngine$Def';
+import { not, identity, chain } from './fp/fp';
 
 const ehv = (selector) => {
 
@@ -187,8 +63,7 @@ const ehv = (selector) => {
 
         return mediaPresentation$
             .switchMap(mediaPresentation => {
-                return mediaSource$
-                    .do(mediaSource => { mediaSource.duration = mediaPresentation.duration; })
+                return withSideEffectTo(mediaSource => { mediaSource.duration = mediaPresentation.duration; })(mediaSource$)
                     .switchMap(mediaSource => {
                         const mediaBuffers = toSupportedMediaSets(mediaPresentation)
                             .map(mediaSet => {
@@ -205,7 +80,6 @@ const ehv = (selector) => {
                                     .mapTo(true);
 
                                 const lastRTT$ = new ReplaySubject(1);
-                                const withSwitchMap = c$ => to$ => (...args) => c$.switchMapTo(to$(...args));
 
                                 const toSegment$ = chain(
                                     provideDuration(lastRTT$),
@@ -234,4 +108,4 @@ const ehv = (selector) => {
     return { setup };
 };
 
-((ehv, global) => window.ehv = ehv)(ehv, window);
+((ehv, global) => global.ehv = ehv)(ehv, window);

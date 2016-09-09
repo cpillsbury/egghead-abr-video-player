@@ -8,6 +8,7 @@ export * from './Subject';
 export * from './fromProperty';
 
 // Higher Order FRP
+export * from './provideDuration';
 export * from './withConcat';
 export * from './withConcatTo';
 export * from './withDuration'; // TODO: Revisit impl (CJP)

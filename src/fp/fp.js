@@ -12,4 +12,6 @@ export * from './noop';
 export * from './not';
 export * from './partial';
 export * from './pluck';
+export * from './toMerged';
+export * from './toO';
 export * from './toUint';
