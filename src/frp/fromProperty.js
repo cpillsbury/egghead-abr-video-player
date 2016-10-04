@@ -3,6 +3,8 @@
 import Observable from './Observable';
 import { existy } from '../fp/fp';
 
+// Observable constructor from a (potentially deep/plucked) property of an object, providing observable values
+// whenever 1 of n events fire indicating that the property may have changed.
 const fromProperty = (o, props, eventNames = []) => {
     if (!existy(props)) { throw new Error(`Invalid props argument of ${props}`); }
     props = Array.isArray(props) ? props : [props];
